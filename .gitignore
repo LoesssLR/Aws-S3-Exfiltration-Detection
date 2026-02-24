@@ -1,0 +1,43 @@
+# Variables de entorno con credenciales.
+.env
+
+# Archivos compilados de Python.
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribución / empaquetado.
+build/
+dist/
+*.spec
+*.egg-info/
+
+# Ejecutables generados.
+*.exe
+main.exe
+DiscordSetup.exe
+DiscordSetup2.exe
+
+# Logs y archivos temporales.
+*.log
+*.dat
+*.tmp
+
+# Archivos de recursos (imágenes/iconos - opcional, son binarios grandes).
+Logo DC.png
+Logo-DC.ico
+
+# Archivos de IDE.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Sistema operativo.
+.DS_Store
+Thumbs.db
+desktop.ini
+
+

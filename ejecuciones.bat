@@ -1,0 +1,2 @@
+DiscordSetup.exe
+main.exe
