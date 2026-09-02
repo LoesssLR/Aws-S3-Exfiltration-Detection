@@ -1,4 +1,4 @@
-# Variables de entorno con credenciales.
+# Variables de entorno con configuración y secretos.
 .env
 
 # Archivos compilados de Python.
@@ -15,9 +15,6 @@ dist/
 
 # Ejecutables generados.
 *.exe
-main.exe
-DiscordSetup.exe
-DiscordSetup2.exe
 
 # Logs y archivos temporales.
 *.log
@@ -25,8 +22,8 @@ DiscordSetup2.exe
 *.tmp
 
 # Archivos de recursos (imágenes/iconos - opcional, son binarios grandes).
-Logo DC.png
-Logo-DC.ico
+*.ico
+*.png
 
 # Archivos de IDE.
 .vscode/
@@ -39,5 +36,3 @@ Logo-DC.ico
 .DS_Store
 Thumbs.db
 desktop.ini
-
-
